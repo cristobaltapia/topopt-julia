@@ -17,7 +17,7 @@ include("utils.jl")
 struct FilterBase <: Filter; end
 struct FilterConv <: Filter; end
 
-export TopOptProblemBase
+export TopOptProblemBase, TopOptProblemConv
 export topopt
 export line_load!, fix_dof!, symmetry_axis!
 export use_elements!
@@ -61,34 +61,36 @@ end
 mutable struct TopOptProblemBase <: TopOptProblem
     nx::Int
     ny::Int
+    rmin::Float64
     dofs::Int
     F::Array{Float64}
     passive::Array{Int,2}
     fixed_dofs::Array{Int}
 
-    function TopOptProblemBase(nx, ny)
+    function TopOptProblemBase(nx, ny, rmin)
         dofs::Int = 2 * (nx + 1) * (ny + 1)
         F::Array{Float64} = zeros(dofs)
         passive::Array{Integer,2} = zeros(ny, nx)
         fixed_dofs::Array{Integer} = Array([])
-        new(nx, ny, dofs, F, passive, fixed_dofs)
+        new(nx, ny, rmin, dofs, F, passive, fixed_dofs)
     end
 end
 
 mutable struct TopOptProblemConv <: TopOptProblem
     nx::Int
     ny::Int
+    rmin::Float64
     dofs::Int
     F::Array{Float64}
     passive::Array{Int,2}
     fixed_dofs::Array{Int}
 
-    function TopOptProblemConv(nx, ny)
+    function TopOptProblemConv(nx, ny, rmin)
         dofs::Int = 2 * (nx + 1) * (ny + 1)
         F::Array{Float64} = zeros(dofs)
         passive::Array{Int,2} = zeros(ny, nx)
         fixed_dofs::Array{Int} = Array([])
-        new(nx, ny, dofs, F, passive, fixed_dofs)
+        new(nx, ny, rmin, dofs, F, passive, fixed_dofs)
     end
 end
 
@@ -123,8 +125,8 @@ mutable struct TopOptResultConv{T} <: TopOptResult
     x::T
     x̃::T
     x̂::T
-    Hs::SparseMatrixCSC
-    h::Float64
+    Hs::Array
+    h::Array
 
     function TopOptResultConv(prob, x)
         nx = prob.nx
@@ -134,8 +136,9 @@ mutable struct TopOptResultConv{T} <: TopOptResult
         vol = 1.0
         x̃ = copy(x)
         x̂ = copy(x)
-        Hs = sparse([], [], [], nx*ny, nx*ny)
-        h = 0.0
+        Hs = zeros(nx*ny, nx*ny)
+        kern_size = length(-ceil(prob.rmin) + 1:ceil(prob.rmin) - 1)
+        h = zeros(kern_size, kern_size)
         new{typeof(x)}(prob, iter, obj, vol, x, x̃, x̂, Hs, h)
     end
 end
@@ -143,8 +146,7 @@ end
 TopOptResult(prob::TopOptProblemBase, x) = TopOptResultBase(prob, x)
 TopOptResult(prob::TopOptProblemConv, x) = TopOptResultConv(prob, x)
 
-function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1,
-                filter_type=1)
+function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1)
     # Material properties
     E₀ = 1.0
     E_min = 1e-9
@@ -152,8 +154,6 @@ function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1,
 
     nx = prob.nx
     ny = prob.ny
-    # Get element stiffness matrix
-    Kₑ = element_K(E₀, ν)
     #
     nodenrs = reshape(1:(1 + nx) * (1 + ny), 1 + ny, 1 + nx);
     edofVec = reshape(2 .* nodenrs[1:end - 1,1:end - 1] .+ 1, nx * ny, 1);
@@ -165,79 +165,54 @@ function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1,
     iK::Array{Int} = reshape((edofMat ⊗ ones(8, 1))', 64 * nx * ny);
     jK::Array{Int} = reshape((edofMat ⊗ ones(1, 8))', 64 * nx * ny);
 
-    # Define loads and supports (half MBB-beam)
     dim = prob.dofs
-
-    F = prob.F
-    U = zeros(dim)
-
-    # Passive elements
-    passive = prob.passive
-
+    # Define loads and supports (half MBB-beam)
     alldofs = Array(1:dim)
     freedofs = setdiff(alldofs, prob.fixed_dofs)
 
-    # Prepare filter
-    if filter_type == 1
-        H, Hs = set_filter(nx, ny, rmin, FilterBase())
-    elseif filter_type == 2
-        h, Hs = set_filter(nx, ny, rmin, FilterConv())
-    end
-    #
+    # Get element stiffness matrix
+    Kₑ = element_K(E₀, ν)
+    F = prob.F
+    U = zeros(dim)
     # Define FE-problem
     fe_prob = FEProblem(prob.F, U, Kₑ, iK, jK, edofMat, freedofs, nx, ny)
-
     # Intatiate result object
     x = volfrac .* ones(ny, nx)
     res = TopOptResult(prob, x)
-
     # Prepare filter
-    println("Test 1")
-    @time set_filter!(res, prob, rmin)
-    println("Test 2")
-    @time H, Hs = set_filter(nx, ny, rmin, FilterBase())
-    println(size(H))
-    println(size(Hs))
+    set_filter!(res, prob, rmin)
 
+    # Initial value for β
     β = 1.0
-    if filter in [1 2]
-        x̄ = copy(x)
-        x̃ₑ = copy(x)
-    elseif filter == 3
-        x̄ = copy(x)
-        x̃ₑ = @. 1 - exp(-β * x̄) + x̄ * exp(-β)
-    end
 
+    # Initilaize sensitivities
     ∂c = similar(x)
     ∂V = zeros(ny, nx)
 
     loop = 0
     loopbeta = 0
     change = 1.0
+
     # Start iteration
     while change > Δ
         loop += 1
         loopbeta += 1
-
         # FE-analysis
         solve_fe!(fe_prob, res, p, E₀, E_min)
-
         # Objective function and sensitivity analysis
         cₑ = compliance(fe_prob, E₀, E_min)
-
         c = sum((E_min .+ res.x̃.^p .* (E₀ - E_min)) .* cₑ)
-
         # Update ∂c and ∂V
         sensitivities!(∂c, ∂V, fe_prob, res, β, p, E₀, E_min, cₑ, filter)
-
-        # Filtering/modification of sensitivities
         # Optimality criteria update of design variables and physical densities
-        @time x_new = optimal_crit(prob, res, H, Hs, volfrac, β, ∂c, ∂V, filter)
-
+        # and filtering/modification of sensitivities
+        x_new = optimal_crit(prob, res, volfrac, β, ∂c, ∂V, filter)
+        # Compute the hange
         change = maximum(abs.(x_new - res.x))
+        # Update result
         res.x .= x_new
-
-        if filter == 3 && β < 512 && ((loopbeta ≥ 50) || change ≤ 0.01)
+        # Update β parameter
+        if typeof(res) == TopOptResultConv && β < 512 && ((loopbeta ≥ 50) || change ≤ 0.01)
             β = 2 * β
             loopbeta = 0
             change = 1
@@ -291,34 +266,10 @@ function set_filter!(res::TopOptResult, prob::TopOptProblemBase, rmin)
     nothing
 end
 
-function set_filter(nx::Int, ny::Int, rmin, ::FilterBase)
-    # Prepare filter
-    #
-    dim_1::Int = nx * ny * (2 * (ceil(rmin) - 1) + 1)^2
-    iH::Array{Int} = ones(dim_1)
-    jH::Array{Int} = ones(size(iH))
-    sH = zeros(size(iH))
-    k = 0
-    for i1 in 1:nx, j1 in 1:ny
-        e1 = (i1 - 1) * ny + j1
-        r_1 = max(i1 - (ceil(rmin) - 1), 1)
-        r_2 = min(i1 + (ceil(rmin) - 1), nx)
-        s_1 = max(j1 - (ceil(rmin) - 1), 1)
-        s_2 = min(j1 + (ceil(rmin) - 1), ny)
-        for i2 in r_1:r_2, j2 in s_1:s_2
-            e2 = (i2 - 1) * ny + j2
-            k += 1
-            iH[k] = e1
-            jH[k] = e2
-            sH[k] = max(0, rmin - sqrt((i1 - i2)^2 + (j1 - j2)^2))
-        end
-    end
-    H = sparse(iH, jH, sH);
-    Hs = sum(H, dims=2)
-    return H, Hs
-end
+function set_filter!(res::TopOptResult, prob::TopOptProblemConv, rmin)
+    nx = prob.nx
+    ny = prob.ny
 
-function set_filter(nx::Int, ny::Int, rmin, ::FilterConv)
     kern_size = length(-ceil(rmin) + 1:ceil(rmin) - 1)
     dy = -ceil(rmin) + 1:ceil(rmin) - 1
     dx = -ceil(rmin) + 1:ceil(rmin) - 1
@@ -326,33 +277,40 @@ function set_filter(nx::Int, ny::Int, rmin, ::FilterConv)
     dy = dy' .* ones(kern_size)
     dx = ones(kern_size)' .* dx
 
-    h = max.(0, rmin .- sqrt.(dx.^2 + dy.^2))
-    Hs = fastconv_2(ones(ny, nx), h)
-
-    return h, Hs
+    res.h = max.(0, rmin .- sqrt.(dx.^2 + dy.^2))
+    res.Hs = fastconv_2(ones(ny, nx), res.h)
+    nothing
 end
 
-function optimal_crit(prob::TopOptProblemBase, res::TopOptResult, H, Hs, volfrac::Float64, β::Float64,
+# Optimal criterion for the normal filter
+function optimal_crit(prob::TopOptProblemBase, res::TopOptResult, volfrac::Float64, β::Float64,
                       ∂c::Array{Float64}, ∂V::Array{Float64}, filter)
     nx = prob.nx
     ny = prob.ny
-    passive = prob.passive
     λ₁::Float64 = 0.0
     λ₂::Float64 = 1e9
     move::Float64 = 0.2
     x_new = similar(res.x)
+    tot_volfrac = volfrac * nx * ny
 
     while (λ₂ - λ₁) / (λ₁ + λ₂) > 1e-3
         λₘ = 0.5 * (λ₂ + λ₁);
-        # x_new .= max.(0, max.(x .- move, min.(1, min.(x .+ move, x .* sqrt.(-∂c ./ ∂V / λₘ)))))
         xₑBₑ = @. res.x * sqrt(-∂c / ∂V / λₘ)
         x_new .= criteria.(res.x, move, xₑBₑ)
-        res.x̃[:] = (H * view(x_new, :)) ./ Hs
+        if filter == 1
+            res.x̃ = x_new
+        elseif filter == 2
+            res.x̃[:] = (res.H * view(x_new, :)) ./ res.Hs
+        elseif filter == 3
+            res.x̂[:] = (res.H * view(x_new, :)) ./ res.Hs
+            res.x̃[:] = @. 1 - exp(-β * res.x̂) + res.x̂ * exp(-β)
+        end
 
-        res.x̃[passive .== 1] .= 0
-        res.x̃[passive .== 2] .= 1
+        # Consider passibe elements
+        res.x̃[prob.passive .== 1] .= 0
+        res.x̃[prob.passive .== 2] .= 1
 
-        if sum(res.x̃) > volfrac * nx * ny
+        if sum(res.x̃) > tot_volfrac
             λ₁ = λₘ
         else
             λ₂ = λₘ
@@ -362,36 +320,42 @@ function optimal_crit(prob::TopOptProblemBase, res::TopOptResult, H, Hs, volfrac
     return x_new
 end
 
-function optimal_crit(nx::Int, ny::Int, x, x̃ₑ, x̄, volfrac, β, ∂c, ∂V, h, Hs,
-                      filter, passive, ::FilterConv)
-    λ₁ = 0.0;
-    λ₂ = 1e9;
-    move = 0.2;
-    x_new = similar(x)
+# Optimal criterion using convolution
+function optimal_crit(prob::TopOptProblemConv, res::TopOptResult, volfrac::Float64, β::Float64,
+                      ∂c::Array{Float64}, ∂V::Array{Float64}, filter)
+    nx = prob.nx
+    ny = prob.ny
+    λ₁::Float64 = 0.0
+    λ₂::Float64 = 1e9
+    move::Float64 = 0.2
+    x_new = similar(res.x)
+    tot_volfrac = volfrac * nx * ny
+
     while (λ₂ - λ₁) / (λ₁ + λ₂) > 1e-3
         λₘ = 0.5 * (λ₂ + λ₁);
         # x_new .= max.(0, max.(x .- move, min.(1, min.(x .+ move, x .* sqrt.(-∂c ./ ∂V / λₘ)))))
-        xₑBₑ = @. x * sqrt(-∂c / ∂V / λₘ)
-        x_new .= criteria.(x, move, xₑBₑ)
+        xₑBₑ = @. res.x * sqrt(-∂c / ∂V / λₘ)
+        x_new .= criteria.(res.x, move, xₑBₑ)
         if filter == 1
-            x̃ₑ = x_new
+            res.x̃ = x_new
         elseif filter == 2
-            x̃ₑ[:] = fastconv_2(x_new, h) ./ Hs
+            res.x̃[:] = fastconv_2(x_new, res.h) ./ res.Hs
         elseif filter == 3
-            x̄[:] = fastconv_2(x_new, h) ./ Hs
-            x̃ₑ[:] = @. 1 - exp(-β * x̄) + x̄ * exp(-β)
+            res.x̂[:] = fastconv_2(x_new, res.h) ./ res.Hs
+            res.x̃[:] = @. 1 - exp(-β * res.x̂) + res.x̂ * exp(-β)
         end
 
-        x̃ₑ[passive .== 1] .= 0
-        x̃ₑ[passive .== 2] .= 1
+        res.x̃[prob.passive .== 1] .= 0
+        res.x̃[prob.passive .== 2] .= 1
 
-        if sum(x̃ₑ) > volfrac * nx * ny
+        if sum(res.x̃) > tot_volfrac
             λ₁ = λₘ
         else
             λ₂ = λₘ
         end
     end
-    return x_new, x̃ₑ, x̄
+
+    return x_new
 end
 
 function criteria(x, move, xₑBₑ)
@@ -461,7 +425,7 @@ function sensitivities!(∂c, ∂V, fe::FEProblem, res::TopOptResultConv, β, p,
     nx = fe.nx
     ny = fe.ny
     Hs = res.Hs
-    H = res.H
+    h = res.h
 
     ∂c .= -p .* (E₀ - E_min) .* res.x̃.^(p - 1) .* cₑ
     ∂V .= ones(ny, nx);
@@ -480,7 +444,6 @@ function sensitivities!(∂c, ∂V, fe::FEProblem, res::TopOptResultConv, β, p,
     return ∂c, ∂V
 end
 
-
 function element_K(E₀::Float64, ν::Float64)
     A₁₁ = [12  3 -6 -3;  3 12  3  0; -6  3 12 -3; -3  0 -3 12]
     A₁₂ = [-6 -3  0  3; -3 -6 -3 -6;  0 -3 -6  3;  3 -6  3 -6]
@@ -489,7 +452,6 @@ function element_K(E₀::Float64, ν::Float64)
     Kₑ = 1 / (1 - ν^2) / 24 .* ([A₁₁ A₁₂; A₁₂' A₁₁] + ν * [B₁₁ B₁₂; B₁₂' B₁₁]);
     return Kₑ
 end
-
 
 end
 
@@ -501,7 +463,7 @@ volfrac = 0.15;
 p = 3.0;
 r_min = nx * 0.04;
 
-prob = TopOptProblemBase(nx, ny)
+prob = TopOptProblemConv(nx, ny, r_min)
 line_load!(prob, ny ÷ 3)
 fix_dof!(prob, :bottom)
 fix_dof!(prob, :right)
@@ -510,4 +472,4 @@ fix_dof!(prob, :right)
 symmetry_axis!(prob, :left)
 use_elements!(prob, :hline; y=ny ÷ 3)
 
-@time topopt(prob, volfrac, p, r_min, Δ=0.05, filter=2, filter_type=1);
+@time topopt(prob, volfrac, p, r_min, Δ=0.05, filter=2);
