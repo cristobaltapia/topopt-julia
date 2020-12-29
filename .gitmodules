@@ -1,0 +1,3 @@
+[submodule "FastConv.jl"]
+	path = FastConv.jl
+	url = https://github.com/aamini/FastConv.jl.git
