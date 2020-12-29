@@ -46,7 +46,7 @@ function fastconv_2(E::Array{T,N}, k::Array{T,N}) where {T,N}
     return ret
 end
 
-mutable struct FEProblem
+struct FEProblem
     F::Array{Float64}
     U::Array{Float64}
     Kₑ::Array{Float64}
@@ -93,45 +93,55 @@ mutable struct TopOptProblemConv <: TopOptProblem
 end
 
 mutable struct TopOptResultBase{T} <: TopOptResult
+    prob::TopOptProblemBase
     iter::Int
     obj::Float64
     vol::Float64
     x::T
     x̃::T
-    H::Array
+    H::SparseMatrixCSC
     Hs::Array
 
-    function TopOptResultBase(x)
+    function TopOptResultBase(prob, x)
+        nx = prob.nx
+        ny = prob.ny
         iter = 0
         obj = maxintfloat(Float64)
         vol = 1.0
         x̃ = copy(x)
-        new{typeof(x)}(iter, obj, vol, x, x̃, [], [])
+        H = sparse([], [], [], nx*ny, nx*ny)
+        Hs = zeros(nx*ny)
+        new{typeof(x)}(prob, iter, obj, vol, x, x̃, H, Hs)
     end
 end
 
 mutable struct TopOptResultConv{T} <: TopOptResult
+    prob::TopOptProblemConv
     iter::Int
     obj::Float64
     vol::Float64
     x::T
     x̃::T
     x̂::T
-    h::Array
-    Hs::Array
+    Hs::SparseMatrixCSC
+    h::Float64
 
-    function TopOptResultConv(x)
+    function TopOptResultConv(prob, x)
+        nx = prob.nx
+        ny = prob.ny
         iter = 0
         obj = maxintfloat(Float64)
         vol = 1.0
         x̃ = copy(x)
         x̂ = copy(x)
-        new{typeof(x)}(iter, obj, vol, x, x̃, x̂, [], [])
+        Hs = sparse([], [], [], nx*ny, nx*ny)
+        h = 0.0
+        new{typeof(x)}(prob, iter, obj, vol, x, x̃, x̂, Hs, h)
     end
 end
 
-TopOptResult(x, ::TopOptProblemBase) = TopOptResultBase(x)
-TopOptResult(x, ::TopOptProblemConv) = TopOptResultConv(x)
+TopOptResult(prob::TopOptProblemBase, x) = TopOptResultBase(prob, x)
+TopOptResult(prob::TopOptProblemConv, x) = TopOptResultConv(prob, x)
 
 function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1,
                 filter_type=1)
@@ -179,10 +189,15 @@ function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1,
 
     # Intatiate result object
     x = volfrac .* ones(ny, nx)
-    res = TopOptResult(x, prob)
+    res = TopOptResult(prob, x)
 
     # Prepare filter
-    set_filter!(res, prob, rmin)
+    println("Test 1")
+    @time set_filter!(res, prob, rmin)
+    println("Test 2")
+    @time H, Hs = set_filter(nx, ny, rmin, FilterBase())
+    println(size(H))
+    println(size(Hs))
 
     β = 1.0
     if filter in [1 2]
@@ -217,7 +232,7 @@ function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1,
 
         # Filtering/modification of sensitivities
         # Optimality criteria update of design variables and physical densities
-        @time x_new = optimal_crit(prob, res, volfrac, β, ∂c, ∂V, filter)
+        @time x_new = optimal_crit(prob, res, H, Hs, volfrac, β, ∂c, ∂V, filter)
 
         change = maximum(abs.(x_new - res.x))
         res.x .= x_new
@@ -270,8 +285,10 @@ function set_filter!(res::TopOptResult, prob::TopOptProblemBase, rmin)
             sH[k] = max(0, rmin - sqrt((i1 - i2)^2 + (j1 - j2)^2))
         end
     end
-    res.H = sparse(iH, jH, sH);
-    res.Hs = sum(res.H, dims=2)
+    H = sparse(iH, jH, sH)
+    res.H = H
+    res.Hs = sum(H, dims=2)
+    nothing
 end
 
 function set_filter(nx::Int, ny::Int, rmin, ::FilterBase)
@@ -315,7 +332,7 @@ function set_filter(nx::Int, ny::Int, rmin, ::FilterConv)
     return h, Hs
 end
 
-function optimal_crit(prob::TopOptProblemBase, res::TopOptResult, volfrac::Float64, β::Float64,
+function optimal_crit(prob::TopOptProblemBase, res::TopOptResult, H, Hs, volfrac::Float64, β::Float64,
                       ∂c::Array{Float64}, ∂V::Array{Float64}, filter)
     nx = prob.nx
     ny = prob.ny
@@ -324,22 +341,16 @@ function optimal_crit(prob::TopOptProblemBase, res::TopOptResult, volfrac::Float
     λ₂::Float64 = 1e9
     move::Float64 = 0.2
     x_new = similar(res.x)
-    H = res.H
-    Hs = res.Hs
 
     while (λ₂ - λ₁) / (λ₁ + λ₂) > 1e-3
         λₘ = 0.5 * (λ₂ + λ₁);
         # x_new .= max.(0, max.(x .- move, min.(1, min.(x .+ move, x .* sqrt.(-∂c ./ ∂V / λₘ)))))
-        println("1")
-        @time xₑBₑ = @. res.x * sqrt(-∂c / ∂V / λₘ)
-        println("2")
-        @time x_new .= criteria.(res.x, move, xₑBₑ)
-        println("3")
-        @time res.x̃[:] = (H * view(x_new, :)) ./ Hs
+        xₑBₑ = @. res.x * sqrt(-∂c / ∂V / λₘ)
+        x_new .= criteria.(res.x, move, xₑBₑ)
+        res.x̃[:] = (H * view(x_new, :)) ./ Hs
 
-        println("4")
-        @time res.x̃[passive .== 1] .= 0
-        @time res.x̃[passive .== 2] .= 1
+        res.x̃[passive .== 1] .= 0
+        res.x̃[passive .== 2] .= 1
 
         if sum(res.x̃) > volfrac * nx * ny
             λ₁ = λₘ
