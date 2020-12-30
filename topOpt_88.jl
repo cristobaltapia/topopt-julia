@@ -70,8 +70,8 @@ mutable struct TopOptProblemBase <: TopOptProblem
     function TopOptProblemBase(nx, ny, rmin)
         dofs::Int = 2 * (nx + 1) * (ny + 1)
         F::Array{Float64} = zeros(dofs)
-        passive::Array{Integer,2} = zeros(ny, nx)
-        fixed_dofs::Array{Integer} = Array([])
+        passive::Array{Int,2} = zeros(ny, nx)
+        fixed_dofs::Array{Int} = Array([])
         new(nx, ny, rmin, dofs, F, passive, fixed_dofs)
     end
 end
@@ -112,7 +112,7 @@ mutable struct TopOptResultBase{T} <: TopOptResult
         vol = 1.0
         x̃ = copy(x)
         H = sparse([], [], [], nx*ny, nx*ny)
-        Hs = zeros(nx*ny)
+        Hs = Array{Float64}([])
         new{typeof(x)}(prob, iter, obj, vol, x, x̃, H, Hs)
     end
 end
@@ -136,7 +136,7 @@ mutable struct TopOptResultConv{T} <: TopOptResult
         vol = 1.0
         x̃ = copy(x)
         x̂ = copy(x)
-        Hs = zeros(nx*ny, nx*ny)
+        Hs = Array{Float64}([])
         kern_size = length(-ceil(prob.rmin) + 1:ceil(prob.rmin) - 1)
         h = zeros(kern_size, kern_size)
         new{typeof(x)}(prob, iter, obj, vol, x, x̃, x̂, Hs, h)
@@ -146,17 +146,18 @@ end
 TopOptResult(prob::TopOptProblemBase, x) = TopOptResultBase(prob, x)
 TopOptResult(prob::TopOptProblemConv, x) = TopOptResultConv(prob, x)
 
-function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1)
+function topopt(prob::TopOptProblem, volfrac, p; Δ=0.01, filter=1)
     # Material properties
     E₀ = 1.0
     E_min = 1e-9
     ν = 0.3
 
-    nx = prob.nx
-    ny = prob.ny
+    nx::Int = prob.nx
+    ny::Int = prob.ny
+    rmin = prob.rmin
     #
-    nodenrs = reshape(1:(1 + nx) * (1 + ny), 1 + ny, 1 + nx);
-    edofVec = reshape(2 .* nodenrs[1:end - 1,1:end - 1] .+ 1, nx * ny, 1);
+    nodenrs::Array{Int} = reshape(1:(1 + nx) * (1 + ny), 1 + ny, 1 + nx);
+    edofVec::Array{Int} = reshape(2 .* nodenrs[1:end - 1,1:end - 1] .+ 1, nx * ny, 1);
 
     # Array with indices relative to the first dof
     rel_ind = [0 1 (2 * ny .+ [2 3 0 1]) -2 -1]
@@ -212,7 +213,7 @@ function topopt(prob::TopOptProblem, volfrac, p, rmin; Δ=0.01, filter=1)
         # Update result
         res.x .= x_new
         # Update β parameter
-        if typeof(res) == TopOptResultConv && β < 512 && ((loopbeta ≥ 50) || change ≤ 0.01)
+        if filter == 3 && β < 512 && ((loopbeta ≥ 50) || change ≤ 0.01)
             β = 2 * β
             loopbeta = 0
             change = 1
@@ -454,22 +455,3 @@ function element_K(E₀::Float64, ν::Float64)
 end
 
 end
-
-using .TopOpt88
-
-nx = 100;
-ny = 120;
-volfrac = 0.15;
-p = 3.0;
-r_min = nx * 0.04;
-
-prob = TopOptProblemConv(nx, ny, r_min)
-line_load!(prob, ny ÷ 3)
-fix_dof!(prob, :bottom)
-fix_dof!(prob, :right)
-# fix_dof!(prob, [2*(ny+1) + 2*(ny+1)*(nx÷2), 2*(ny+1) + 2*(ny+1)*(nx÷2)-1])
-# fix_dof!(prob, [2*(ny+1)÷2 + 2*(ny+1)*(nx+1), 2*(ny+1)÷2 + 2*(ny+1)*(nx+1)-1])
-symmetry_axis!(prob, :left)
-use_elements!(prob, :hline; y=ny ÷ 3)
-
-@time topopt(prob, volfrac, p, r_min, Δ=0.05, filter=2);
