@@ -334,7 +334,7 @@ function optimal_crit(prob::TopOptProblemConv, res::TopOptResult, β::Float64,
     λ₂::Float64 = 1e9
     move::Float64 = 0.2
     x_new = similar(res.x)
-    tot_volfrac = volfrac * nx * ny
+    tot_volfrac = prob.volfrac * nx * ny
 
     while (λ₂ - λ₁) / (λ₁ + λ₂) > 1e-3
         λₘ = 0.5 * (λ₂ + λ₁);
@@ -374,8 +374,8 @@ function criteria(x, move, xₑBₑ)
     return x_new
 end
 
-function solve_fe!(fe::FEProblem, res::TopOptResult, p, E₀, E_min)
-    sK = reshape(fe.Kₑ[:] * (E_min .+ res.x̃[:]'.^p .* (E₀ - E_min)), 64 * fe.nx * fe.ny)
+function solve_fe!(fe::FEProblem, x̃::Array, p, E₀, E_min)
+    sK = reshape(fe.Kₑ[:] * (E_min .+ x̃[:]'.^p .* (E₀ - E_min)), 64 * fe.nx * fe.ny)
     # Global stiffness matrix
     K = sparse(fe.iK, fe.jK, sK)
 
