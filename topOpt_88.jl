@@ -197,18 +197,19 @@ function minimize(prob::TopOptProblem; Δ=0.01, filter=1)
     loop = 0
     loopbeta = 0
     change = 1.0
+    p = prob.p
 
     # Start iteration
     while change > Δ
         loop += 1
         loopbeta += 1
         # FE-analysis
-        solve_fe!(fe_prob, res.x̃, prob.p, E₀, E_min)
+        solve_fe!(fe_prob, res.x̃, p, E₀, E_min)
         # Objective function and sensitivity analysis
         cₑ = compliance(fe_prob, E₀, E_min)
-        c = sum((E_min .+ res.x̃.^prob.p .* (E₀ - E_min)) .* cₑ)
+        c = sum((E_min .+ res.x̃.^p .* (E₀ - E_min)) .* cₑ)
         # Update ∂c and ∂V
-        sensitivities!(∂c, ∂V, fe_prob, res, β, prob.p, E₀, E_min, cₑ, filter)
+        sensitivities!(∂c, ∂V, fe_prob, res, β, p, E₀, E_min, cₑ, filter)
         # Optimality criteria update of design variables and physical densities
         # and filtering/modification of sensitivities
         x_new = optimal_crit(prob, res, β, ∂c, ∂V, filter)
