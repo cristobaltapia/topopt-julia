@@ -31,7 +31,7 @@ use_elements!(prob, :hline; y=ny ÷ 3)
 
 ![optimization](./plot_88.png)
 
-== References ==
+## References
 
 - *Sigmund, O.* (2001), _A 99 line topology optimization code written in Matlab_
 - *Andreassen, Erik; Clausen, Anders; Schevenels, Mattias; Lazarov, Boyan S.; Sigmund, Ole* (2010), _Efficient topology optimization in MATLAB using 88 lines of code_
