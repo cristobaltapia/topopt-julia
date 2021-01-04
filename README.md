@@ -26,7 +26,7 @@ fix_dof!(prob, :right)
 symmetry_axis!(prob, :left)
 use_elements!(prob, :hline; y=ny ÷ 3)
 
-@time res = minimize(prob, Δ=0.01, filter=2);
+@time res = optimize(prob, Δ=0.01, filter=2);
 ```
 
 ![optimization](./plot_88.png)
