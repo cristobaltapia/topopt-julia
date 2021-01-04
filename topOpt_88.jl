@@ -18,7 +18,7 @@ struct FilterBase <: Filter; end
 struct FilterConv <: Filter; end
 
 export TopOptProblemBase, TopOptProblemConv
-export minimize
+export optimize
 export line_load!, fix_dof!, symmetry_axis!
 export use_elements!
 
@@ -150,7 +150,7 @@ end
 TopOptResult(prob::TopOptProblemBase, x) = TopOptResultBase(prob, x)
 TopOptResult(prob::TopOptProblemConv, x) = TopOptResultConv(prob, x)
 
-function minimize(prob::TopOptProblem; Δ=0.01, filter=1)
+function optimize(prob::TopOptProblem; Δ=0.01, filter=1)
     # Material properties
     E₀ = 1.0
     E_min = 1e-9
